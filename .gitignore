@@ -67,7 +67,6 @@ lib/
 
 # Local consumer credentials, browser evidence and financial exports
 .env.*
-!.env.example
 accounts.json
 data/
 *.csv
