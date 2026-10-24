@@ -1,4 +1,8 @@
 import moment, { type Moment } from 'moment';
+import { classifyIsracardValidation, classifyIsracardLogin } from '../../runtime/isracard-auth-result';
+import { scrapeIsracardPendingList } from '../../runtime/isracard-pending-list';
+import { scrapeIsracardPendingDashboard, attachPendingTransactions } from '../../runtime/isracard-pending-dashboard';
+import { discoverPendingRoutes } from '../../runtime/pending-provider-routes';
 import { type Page } from 'puppeteer';
 import { ALT_SHEKEL_CURRENCY, SHEKEL_CURRENCY, SHEKEL_CURRENCY_KEYWORD } from '../constants';
 import { ScraperProgressTypes } from '../definitions';
@@ -553,19 +557,9 @@ class IsracardAmexBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCred
     };
     debug('logging in with validate request');
     const validateResult = await fetchPostWithinPage<ScrapedLoginValidation>(this.page, validateUrl, validateRequest);
-    if (
-      !validateResult ||
-      !validateResult.Header ||
-      validateResult.Header.Status !== '1' ||
-      !validateResult.ValidateIdDataBean
-    ) {
-      throw new Error('unknown error during login');
-    }
-
-    const validateReturnCode = validateResult.ValidateIdDataBean.returnCode;
-    debug(`user validate with return code '${validateReturnCode}'`);
-    if (validateReturnCode === '1') {
-      const { userName } = validateResult.ValidateIdDataBean;
+    const validation = classifyIsracardValidation(validateResult);
+    if (validation.outcome === 'CONTINUE_LOGIN') {
+      const userName = validateResult?.ValidateIdDataBean?.userName;
 
       const loginUrl = `${this.servicesUrl}?reqName=performLogonI`;
       const request = {
@@ -578,15 +572,15 @@ class IsracardAmexBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCred
       };
       debug('user login started');
       const loginResult = await fetchPostWithinPage<{ status: string }>(this.page, loginUrl, request);
-      debug(`user login with status '${loginResult?.status}'`, loginResult);
+      const classified = classifyIsracardLogin(loginResult);
 
-      if (loginResult && loginResult.status === '1') {
+      if (classified.outcome === 'SUCCESS') {
         this.emitProgress(ScraperProgressTypes.LoginSuccess);
         debug(`Login completed in ${performance.now() - loginStartTime}ms`);
         return { success: true };
       }
 
-      if (loginResult && loginResult.status === '3') {
+      if (classified.outcome === 'CHANGE_PASSWORD') {
         this.emitProgress(ScraperProgressTypes.ChangePassword);
         return {
           success: false,
@@ -597,11 +591,12 @@ class IsracardAmexBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCred
       this.emitProgress(ScraperProgressTypes.LoginFailed);
       return {
         success: false,
-        errorType: ScraperErrorTypes.InvalidPassword,
+        errorType: ScraperErrorTypes.UnknownError,
+        authenticationDiagnostic: classified.diagnostic,
       };
     }
 
-    if (validateReturnCode === '4') {
+    if (validation.outcome === 'CHANGE_PASSWORD') {
       this.emitProgress(ScraperProgressTypes.ChangePassword);
       return {
         success: false,
@@ -612,7 +607,8 @@ class IsracardAmexBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCred
     this.emitProgress(ScraperProgressTypes.LoginFailed);
     return {
       success: false,
-      errorType: ScraperErrorTypes.InvalidPassword,
+      errorType: ScraperErrorTypes.UnknownError,
+      authenticationDiagnostic: validation.diagnostic,
     };
   }
 
@@ -621,7 +617,7 @@ class IsracardAmexBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCred
     const startDate = this.options.startDate || defaultStartMoment.toDate();
     const startMoment = moment.max(defaultStartMoment, moment(startDate));
 
-    return fetchAllTransactions(
+    const result: ScraperScrapingResult = await fetchAllTransactions(
       this.page,
       this.options,
       {
@@ -631,6 +627,51 @@ class IsracardAmexBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCred
       },
       startMoment,
     );
+    if (!this.options.includePendingDashboard || !['11', '77'].includes(this.companyCode)) return result;
+    let routes = discoverPendingRoutes({ companyCode: this.companyCode, baseUrl: this.baseUrl });
+    if (this.companyCode === '77') {
+      try {
+        await this.page.goto(`${this.baseUrl}/personalarea/dashboard/`, { waitUntil: 'domcontentloaded' });
+        await this.page.waitForNetworkIdle({ idleTime: 350, timeout: 10000 }).catch(() => {});
+        const links = await this.page.evaluate(() =>
+          Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href]'), node => node.href),
+        );
+        routes = discoverPendingRoutes({
+          companyCode: this.companyCode,
+          baseUrl: this.baseUrl,
+          currentUrl: this.page.url(),
+          links,
+        });
+      } catch {
+        routes = null;
+      }
+    }
+    if (!routes?.transactionsUrl && !routes?.dashboardUrl) {
+      result.pendingDashboard = {
+        source: 'isracard-transactions-page',
+        status: 'partial',
+        coverage: 'per-card-pending-lists',
+        failure: 'provider_pending_route_not_observed',
+        cardCount: 0,
+        cards: [],
+      };
+      return result;
+    }
+    let pending = await scrapeIsracardPendingList(this.page, {
+      enabled: true,
+      transactionsUrl:
+        this.options.pendingTransactionsUrl || routes.transactionsUrl || routes.dashboardUrl || undefined,
+    });
+    if (!pending.coverage.cardCount && routes.dashboardUrl) {
+      const fullListAttempt = pending.coverage;
+      pending = await scrapeIsracardPendingDashboard(this.page, {
+        enabled: true,
+        dashboardUrl: this.options.pendingDashboardUrl || routes.dashboardUrl,
+      });
+      pending.coverage.fullListAttempt = fullListAttempt;
+    }
+    attachPendingTransactions(result, pending.transactions, pending.coverage);
+    return result;
   }
 }
 

@@ -2,6 +2,7 @@ import HapoalimScraper from './hapoalim';
 import { maybeTestCompanyAPI, extendAsyncTimeout, getTestsConfig, exportTransactions } from '../tests/tests-utils';
 import { SCRAPERS } from '../definitions';
 import { LoginResults } from './base-scraper-with-browser';
+import { HAPOALIM_TRANSACTION_ROW_LIMIT, validateTransactionCollection } from './hapoalim-coverage';
 
 const COMPANY_ID = 'hapoalim'; // TODO this property should be hard-coded in the provider
 const testsConfig = getTestsConfig();
@@ -49,5 +50,27 @@ describe('Hapoalim legacy scraper', () => {
     expect(result.success).toBeTruthy();
 
     exportTransactions(COMPANY_ID, result.accounts || []);
+  });
+});
+
+describe('Hapoalim transaction collection coverage', () => {
+  test('rejects malformed responses and marks the provider row limit partial', () => {
+    expect(() => validateTransactionCollection(null)).toThrow('malformed transaction collection');
+    expect(() => validateTransactionCollection({ transactions: 'invalid' })).toThrow(
+      'malformed transaction collection',
+    );
+    expect(validateTransactionCollection({ transactions: [] })).toEqual({
+      transactions: [],
+      collectionCoverage: { status: 'available', returnedCount: 0 },
+    });
+    expect(validateTransactionCollection({ transactions: Array(HAPOALIM_TRANSACTION_ROW_LIMIT).fill({}) })).toEqual({
+      transactions: Array(HAPOALIM_TRANSACTION_ROW_LIMIT).fill({}),
+      collectionCoverage: {
+        status: 'partial',
+        reason: 'row_limit_reached',
+        rowLimit: HAPOALIM_TRANSACTION_ROW_LIMIT,
+        returnedCount: HAPOALIM_TRANSACTION_ROW_LIMIT,
+      },
+    });
   });
 });

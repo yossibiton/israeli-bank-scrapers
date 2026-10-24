@@ -1,4 +1,5 @@
 export enum ScraperErrorTypes {
+  UnknownError = 'UNKNOWN_ERROR',
   TwoFactorRetrieverMissing = 'TWO_FACTOR_RETRIEVER_MISSING',
   InvalidPassword = 'INVALID_PASSWORD',
   ChangePassword = 'CHANGE_PASSWORD',

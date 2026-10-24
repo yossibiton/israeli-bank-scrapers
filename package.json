@@ -28,7 +28,8 @@
     "postbuild": "rimraf lib/tests",
     "prepare:core": "git reset --hard && node utils/prepare-israeli-bank-scrapers-core.js && npm i --package-lock-only && npm ci && npm run lint:fix && npm run build",
     "prepare:default": "git reset --hard && npm ci && npm run build",
-    "reset": "git reset --hard && npm ci"
+    "reset": "git reset --hard && npm ci",
+    "test:runtime": "node --test --test-concurrency=2 \"runtime-tests/*.test.cjs\""
   },
   "repository": {
     "type": "git",
@@ -81,6 +82,7 @@
     "puppeteer": "^24.40.0"
   },
   "files": [
-    "lib/**/*"
+    "lib/**/*",
+    "runtime/**/*"
   ]
 }

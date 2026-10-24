@@ -215,10 +215,51 @@ function isCardTransactionDetails(
   return (result as CardTransactionDetails).result !== undefined;
 }
 
-function isCardPendingTransactionDetails(
-  result: CardPendingTransactionDetails | CardTransactionDetailsError,
-): result is CardPendingTransactionDetails {
-  return (result as CardPendingTransactionDetails).result !== undefined;
+function isCardPendingTransactionDetails(result: unknown): result is CardPendingTransactionDetails {
+  if (!result || typeof result !== 'object') return false;
+  const cardsList = (result as { result?: { cardsList?: unknown } }).result?.cardsList;
+  return (
+    Array.isArray(cardsList) &&
+    cardsList.every(card => {
+      if (!card || typeof card !== 'object') return false;
+      const authDetalisList = (card as { authDetalisList?: unknown }).authDetalisList;
+      return (
+        Array.isArray(authDetalisList) &&
+        authDetalisList.every(
+          transaction => transaction !== null && typeof transaction === 'object' && !Array.isArray(transaction),
+        )
+      );
+    })
+  );
+}
+
+export interface PendingCoverage {
+  status: 'available' | 'partial';
+  reason: 'response_ok' | 'response_status_96' | 'unexpected_status' | 'malformed_payload';
+  pendingCount?: number;
+}
+
+export function getPendingCoverage(pendingData: unknown): PendingCoverage {
+  const response = pendingData as { statusCode?: number } | null;
+  const validPayload = isCardPendingTransactionDetails(pendingData);
+  const validData = pendingData as CardPendingTransactionDetails;
+  if (response?.statusCode === 1 && validPayload) {
+    return {
+      status: 'available',
+      reason: 'response_ok',
+      pendingCount: validData.result.cardsList.reduce((count, card) => count + card.authDetalisList.length, 0),
+    };
+  }
+  if (response?.statusCode === 96) {
+    return {
+      status: 'partial',
+      reason: 'response_status_96',
+      ...(validPayload
+        ? { pendingCount: validData.result.cardsList.reduce((count, card) => count + card.authDetalisList.length, 0) }
+        : {}),
+    };
+  }
+  return { status: 'partial', reason: validPayload ? 'unexpected_status' : 'malformed_payload' };
 }
 
 function getBalanceAmount(frame: CardLevelFrame | undefined, accountGroup: IssuedCardsGroup | undefined) {
@@ -589,6 +630,7 @@ class VisaCalScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials> 
         ...apiHeaders,
       },
     );
+    const pendingCoverage = getPendingCoverage(pendingData);
 
     debug(`fetch completed transactions for card ${card.cardUniqueId}`);
     for (let i = 0; i <= months; i++) {
@@ -634,13 +676,14 @@ class VisaCalScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials> 
 
     const balanceAmount = getBalanceAmount(frame, accountGroup);
 
-    const result: TransactionsAccount = {
+    const result: TransactionsAccount & { pendingCoverage: PendingCoverage } = {
       txns,
       balance: balanceAmount != null ? -balanceAmount : undefined,
       balanceDate: balanceDate != null ? balanceDate : undefined,
       accountNumber: card.last4Digits,
       cardType,
       cardFrame: accountGroup?.frameLimitForCardAmount,
+      pendingCoverage,
     };
 
     return result;
@@ -666,7 +709,6 @@ class VisaCalScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials> 
 
     debug('return the scraped accounts');
 
-    debug(JSON.stringify(accounts, null, 2));
     return {
       success: true,
       accounts,

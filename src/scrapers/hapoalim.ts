@@ -9,6 +9,7 @@ import { type Transaction, TransactionStatuses, TransactionTypes, type Transacti
 import { BaseScraperWithBrowser, LoginResults, type PossibleLoginResults } from './base-scraper-with-browser';
 import { type ScraperOptions } from './interface';
 import { getRawTransaction } from '../helpers/transactions';
+import { validateTransactionCollection, type HapoalimCollectionCoverage } from './hapoalim-coverage';
 
 const debug = getDebug('hapoalim');
 
@@ -185,12 +186,16 @@ async function getAccountTransactions(
   const txnsUrl = `${apiSiteUrl}/current-account/transactions?accountId=${accountNumber}&numItemsPerPage=1000&retrievalEndDate=${endDate}&retrievalStartDate=${startDate}&sortCode=1`;
   const txnsResult = await fetchPoalimXSRFWithinPage(page, txnsUrl, '/current-account/transactions');
 
+  const validated = validateTransactionCollection<ScrapedTransaction>(txnsResult);
   const finalResult =
-    additionalTransactionInformation && txnsResult?.transactions.length
-      ? await getExtraScrap(txnsResult, baseUrl, page, accountNumber)
-      : txnsResult;
+    additionalTransactionInformation && validated.transactions.length
+      ? await getExtraScrap({ transactions: validated.transactions }, baseUrl, page, accountNumber)
+      : { transactions: validated.transactions };
 
-  return convertTransactions(finalResult?.transactions ?? [], options);
+  return {
+    txns: convertTransactions(finalResult.transactions, options),
+    collectionCoverage: validated.collectionCoverage,
+  };
 }
 
 async function getAccountBalance(apiSiteUrl: string, page: Page, accountNumber: string) {
@@ -222,14 +227,13 @@ async function fetchAccountData(page: Page, baseUrl: string, options: ScraperOpt
   const startDateStr = startMoment.format(DATE_FORMAT);
   const endDateStr = moment().format(DATE_FORMAT);
 
-  const accounts: TransactionsAccount[] = [];
+  const accounts: (TransactionsAccount & { collectionCoverage: HapoalimCollectionCoverage })[] = [];
 
   for (const account of openAccountsInfo) {
-    debug('getting information for account %s', account.accountNumber);
     const accountNumber = `${account.bankNumber}-${account.branchNumber}-${account.accountNumber}`;
 
     const balance = await getAccountBalance(apiSiteUrl, page, accountNumber);
-    const txns = await getAccountTransactions(
+    const transactionResult = await getAccountTransactions(
       baseUrl,
       apiSiteUrl,
       page,
@@ -243,7 +247,8 @@ async function fetchAccountData(page: Page, baseUrl: string, options: ScraperOpt
     accounts.push({
       accountNumber,
       balance,
-      txns,
+      txns: transactionResult.txns,
+      collectionCoverage: transactionResult.collectionCoverage,
     });
   }
 

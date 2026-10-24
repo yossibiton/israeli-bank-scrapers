@@ -1,4 +1,6 @@
 import { type BrowserContext, type Browser, type Page } from 'puppeteer';
+import { type AuthenticationDiagnostic } from '../../runtime/isracard-auth-result';
+import { type PendingCoverage } from '../../runtime/isracard-pending-list';
 import { type CompanyTypes, type ScraperProgressTypes } from '../definitions';
 import { type TransactionsAccount } from '../transactions';
 import { type ErrorResult, type ScraperErrorTypes } from './errors';
@@ -94,6 +96,10 @@ interface DefaultBrowserOptions {
 type ScraperBrowserOptions = ExternalBrowserOptions | ExternalBrowserContextOptions | DefaultBrowserOptions;
 
 export type ScraperOptions = ScraperBrowserOptions & {
+  /** Opt-in pending authorization collection; failures retain posted data. */
+  includePendingDashboard?: boolean;
+  pendingTransactionsUrl?: string;
+  pendingDashboardUrl?: string;
   /**
    * The company you want to scrape
    */
@@ -181,6 +187,8 @@ export interface OutputDataOptions {
 }
 
 export interface ScraperScrapingResult {
+  authenticationDiagnostic?: AuthenticationDiagnostic;
+  pendingDashboard?: PendingCoverage;
   success: boolean;
   accounts?: TransactionsAccount[];
   futureDebits?: FutureDebit[];

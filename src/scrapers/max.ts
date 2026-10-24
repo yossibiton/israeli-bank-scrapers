@@ -284,8 +284,25 @@ function mapTransaction(rawTransaction: ScrapedTransaction, options?: ScraperOpt
 }
 interface ScrapedTransactionsResult {
   result?: {
-    transactions: ScrapedTransaction[];
+    statusCode?: number;
+    transactions?: ScrapedTransaction[];
   };
+}
+
+export function getMonthlyTransactions(data: unknown): ScrapedTransaction[] {
+  if (!data || typeof data !== 'object' || !('result' in data) || !data.result || typeof data.result !== 'object') {
+    throw new Error('MAX monthly transactions response is missing result');
+  }
+
+  const result = data.result as { statusCode?: number; transactions?: unknown };
+  if (result.statusCode !== undefined && result.statusCode !== 1) {
+    throw new Error('MAX monthly transactions request failed');
+  }
+  if (!Array.isArray(result.transactions)) {
+    throw new Error('MAX monthly transactions response is missing transactions array');
+  }
+
+  return result.transactions as ScrapedTransaction[];
 }
 
 async function fetchTransactionsForMonth(page: Page, monthMoment: Moment, options?: ScraperOptions) {
@@ -293,10 +310,7 @@ async function fetchTransactionsForMonth(page: Page, monthMoment: Moment, option
 
   const data = await fetchGetWithinPage<ScrapedTransactionsResult>(page, url);
   const transactionsByAccount: Record<string, Transaction[]> = {};
-
-  if (!data || !data.result) return transactionsByAccount;
-
-  data.result.transactions
+  getMonthlyTransactions(data)
     // Filter out non-transactions without a plan type, e.g. summary rows
     .filter(transaction => !!transaction.planName)
     .forEach((transaction: ScrapedTransaction) => {
@@ -320,6 +334,47 @@ function addResult(allResults: Record<string, Transaction[]>, result: Record<str
     clonedResults[accountNumber].push(...result[accountNumber]);
   });
   return clonedResults;
+}
+
+export interface MonthlyCollectionCoverage {
+  status: 'partial';
+  reason: 'monthly_response_unavailable';
+  requestedMonths: string[];
+  availableMonths: string[];
+  unavailableMonths: string[];
+}
+
+export async function fetchMonthlyCollections(
+  allMonths: Moment[],
+  requestMonth: (month: Moment) => Promise<Record<string, Transaction[]>>,
+): Promise<{ allResults: Record<string, Transaction[]>; collectionCoverage: MonthlyCollectionCoverage | null }> {
+  let allResults: Record<string, Transaction[]> = {};
+  const requestedMonths = allMonths.map(month => month.format('YYYY-MM'));
+  const availableMonths: string[] = [];
+  const unavailableMonths: string[] = [];
+
+  for (let index = 0; index < allMonths.length; index += 1) {
+    try {
+      const result = await requestMonth(allMonths[index]);
+      allResults = addResult(allResults, result);
+      availableMonths.push(requestedMonths[index]);
+    } catch {
+      unavailableMonths.push(requestedMonths[index]);
+    }
+  }
+
+  if (availableMonths.length === 0) throw new Error('MAX monthly transactions collections unavailable');
+
+  const collectionCoverage = unavailableMonths.length
+    ? {
+        status: 'partial' as const,
+        reason: 'monthly_response_unavailable' as const,
+        requestedMonths,
+        availableMonths,
+        unavailableMonths,
+      }
+    : null;
+  return { allResults, collectionCoverage };
 }
 
 function prepareTransactions(
@@ -350,11 +405,9 @@ async function fetchTransactions(page: Page, options: ScraperOptions) {
   await loadCategories(page);
   const homePageCards = await loadHomePageData(page);
 
-  let allResults: Record<string, Transaction[]> = {};
-  for (let i = 0; i < allMonths.length; i += 1) {
-    const result = await fetchTransactionsForMonth(page, allMonths[i], options);
-    allResults = addResult(allResults, result);
-  }
+  const { allResults, collectionCoverage } = await fetchMonthlyCollections(allMonths, month =>
+    fetchTransactionsForMonth(page, month, options),
+  );
 
   Object.keys(allResults).forEach(accountNumber => {
     let txns = allResults[accountNumber];
@@ -367,7 +420,7 @@ async function fetchTransactions(page: Page, options: ScraperOptions) {
     allResults[accountNumber] = txns;
   });
 
-  return { allResults, homePageCards };
+  return { allResults, homePageCards, collectionCoverage };
 }
 
 function getPossibleLoginResults(page: Page): PossibleLoginResults {
@@ -430,12 +483,13 @@ class MaxScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials> {
   }
 
   async fetchData() {
-    const { allResults, homePageCards } = await fetchTransactions(this.page, this.options);
+    const { allResults, homePageCards, collectionCoverage } = await fetchTransactions(this.page, this.options);
     const accounts: TransactionsAccount[] = Object.keys(allResults).map(accountNumber => {
       const card = homePageCards.get(accountNumber);
       return {
         accountNumber,
         txns: allResults[accountNumber],
+        ...(collectionCoverage ? { collectionCoverage } : {}),
         balance: card ? getCardBalance(card) : undefined,
         balanceDate: card ? getCardBalanceDate(card) : undefined,
         cardFrame: card?.CreditLimit ?? undefined,
